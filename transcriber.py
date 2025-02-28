@@ -3,10 +3,97 @@ import requests
 import whisper
 from pydub import AudioSegment
 import time
+import io
+import threading
+import queue
 from config import MODEL_SIZE
 
 # Load Whisper model
 model = whisper.load_model(MODEL_SIZE)
+
+class LiveTranscriber:
+    def __init__(self, chunk_duration=10):
+        self.audio_queue = queue.Queue()
+        self.is_running = False
+        self.chunk_duration = chunk_duration  # Duration in seconds
+        self.buffer = io.BytesIO()
+        self.current_chunk_start = time.time()
+
+    def start_streaming(self, url):
+        self.is_running = True
+        
+        # Start stream capture thread
+        stream_thread = threading.Thread(target=self._capture_stream, args=(url,))
+        stream_thread.daemon = True
+        stream_thread.start()
+        
+        # Start transcription thread
+        transcribe_thread = threading.Thread(target=self._process_audio)
+        transcribe_thread.daemon = True
+        transcribe_thread.start()
+        
+        return stream_thread, transcribe_thread
+
+    def stop_streaming(self):
+        self.is_running = False
+
+    def _capture_stream(self, url):
+        try:
+            response = requests.get(url, stream=True)
+            response.raise_for_status()
+            
+            for chunk in response.iter_content(chunk_size=1024):
+                if not self.is_running:
+                    break
+                    
+                self.buffer.write(chunk)
+                
+                # Check if we've captured enough audio
+                if time.time() - self.current_chunk_start >= self.chunk_duration:
+                    # Process the current buffer
+                    self.buffer.seek(0)
+                    audio = AudioSegment.from_file(self.buffer, format="mp3")
+                    self.audio_queue.put(audio)
+                    
+                    # Reset buffer and timer
+                    self.buffer = io.BytesIO()
+                    self.current_chunk_start = time.time()
+                    
+        except requests.RequestException as e:
+            print(f"Error in stream capture: {e}")
+            self.is_running = False
+
+    def _process_audio(self):
+        while self.is_running:
+            try:
+                # Get audio chunk from queue
+                audio = self.audio_queue.get(timeout=1)
+                
+                # Preprocess audio
+                audio = self._preprocess_audio(audio)
+                
+                # Save temporary file for Whisper
+                temp_file = "temp_chunk.wav"
+                audio.export(temp_file, format="wav")
+                
+                # Transcribe
+                result = model.transcribe(temp_file)
+                if result["text"].strip():  # Only print non-empty transcriptions
+                    print(f"Transcription: {result['text']}")
+                
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Error in audio processing: {e}")
+
+    def _preprocess_audio(self, audio):
+        # Convert to mono
+        audio = audio.set_channels(1)
+        # Normalize volume
+        audio = audio.apply_gain(-audio.max_dBFS)
+        # Resample to 16kHz
+        audio = audio.set_frame_rate(16000)
+        return audio
 
 def get_audio_stream(url, output_file="radio.wav"):
   """
@@ -75,16 +162,10 @@ def transcribe_audio(file_path: str):
   return result["text"]
 
 def transcribe_audio_pipeline(station_url):
-  """
-  Main function to capture, preprocess, and transcribe audio from a radio station.
-  """
-  # Step 1: Capture audio stream
-  get_audio_stream(station_url)
-
-  # Step 2: Preprocess the captured audio
-  processed_file = preprocess_audio("radio.wav")
-
-  # Step 3: Transcribe the preprocessed audio
-  transcription = transcribe_audio(processed_file)
-
-  return transcription
+    """
+    Main function to continuously transcribe audio from a radio station.
+    Returns a LiveTranscriber instance that can be controlled.
+    """
+    transcriber = LiveTranscriber()
+    transcriber.start_streaming(station_url)
+    return transcriber
