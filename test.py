@@ -5,7 +5,7 @@ import whisper
 
 def read_audio_message(audio_file_path):
     # Load Whisper model
-    model = whisper.load_model("medium")
+    model = whisper.load_model("tiny")
     
     # Transcribe audio file
     result = model.transcribe(audio_file_path)

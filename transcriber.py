@@ -7,6 +7,8 @@ import io
 import threading
 import queue
 from config import MODEL_SIZE
+from openai import OpenAI
+from datetime import datetime
 
 # Load Whisper model
 model = whisper.load_model(MODEL_SIZE)
@@ -64,27 +66,79 @@ class LiveTranscriber:
             self.is_running = False
 
     def _process_audio(self):
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key="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"  # Move this to config.py
+        )
+        
         while self.is_running:
             try:
-                # Get audio chunk from queue
                 audio = self.audio_queue.get(timeout=1)
-                
-                # Preprocess audio
                 audio = self._preprocess_audio(audio)
                 
-                # Save temporary file for Whisper
                 temp_file = "temp_chunk.wav"
                 audio.export(temp_file, format="wav")
                 
                 # Transcribe
                 result = model.transcribe(temp_file)
-                if result["text"].strip():  # Only print non-empty transcriptions
-                    print(f"Transcription: {result['text']}")
+                transcribed_text = result["text"].strip()
                 
+                if transcribed_text:
+                    # Generate analysis
+                    analysis = self._analyze_dispatch(client, transcribed_text)
+                    
+                    # Send to callback if provided
+                    if hasattr(self, 'callback') and self.callback:
+                        self.callback(transcribed_text, analysis)
+                    
+                    print(f"Transcription: {transcribed_text}")
+                    print("Analysis:", analysis)
+                    
             except queue.Empty:
                 continue
             except Exception as e:
                 print(f"Error in audio processing: {e}")
+
+    def _analyze_dispatch(self, client, dispatch_message):
+        prompt = f"""Extract key details from the following dispatcher message and format them exactly as shown below:
+{dispatch_message}
+
+Type: 
+Location: 
+Severity: 
+Units Responding: 
+Description: 
+Timestamp: 
+"""
+        try:
+            completion = client.chat.completions.create(
+                extra_headers={
+                    "HTTP-Referer": "YOUR_WEBSITE",
+                    "X-Title": "Police Scanner Analysis",
+                },
+                model="deepseek/deepseek-chat:free",
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1,
+                max_tokens=500
+            )
+            
+            generated_text = completion.choices[0].message.content
+            return self._extract_details(generated_text)
+            
+        except Exception as e:
+            print(f"Error in analysis: {e}")
+            return {}
+
+    def _extract_details(self, text):
+        details = {}
+        lines = text.split("\n")
+        for line in lines:
+            if ":" in line:
+                key, value = line.split(":", 1)
+                details[key.strip()] = value.strip()
+        return details
 
     def _preprocess_audio(self, audio):
         # Convert to mono
