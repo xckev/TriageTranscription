@@ -3,3 +3,6 @@ uvicorn
 httpx
 openai-whisper
 pydub
+transformers
+torch
+openai
