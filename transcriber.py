@@ -9,6 +9,7 @@ import queue
 from config import MODEL_SIZE
 from openai import OpenAI
 from datetime import datetime
+from typing import Dict
 
 # Load Whisper model
 model = whisper.load_model(MODEL_SIZE)
@@ -87,12 +88,14 @@ class LiveTranscriber:
                     # Generate analysis
                     analysis = self._analyze_dispatch(client, transcribed_text)
                     
-                    # Send to callback if provided
-                    if hasattr(self, 'callback') and self.callback:
-                        self.callback(transcribed_text, analysis)
-                    
-                    print(f"Transcription: {transcribed_text}")
-                    print("Analysis:", analysis)
+                    # Only process if we have valid analysis
+                    if analysis:
+                        # Send to callback if provided
+                        if hasattr(self, 'callback') and self.callback:
+                            self.callback(transcribed_text, analysis)
+                        
+                        print(f"Transcription: {transcribed_text}")
+                        print("Analysis:", analysis)
                     
             except queue.Empty:
                 continue
@@ -100,21 +103,45 @@ class LiveTranscriber:
                 print(f"Error in audio processing: {e}")
 
     def _analyze_dispatch(self, client, dispatch_message):
-        prompt = f"""Extract key details from the following dispatcher message and format them exactly as shown below:
+        # Get recent history if available
+        recent_history = ""
+        if hasattr(self, 'callback') and hasattr(self.callback, '__self__'):
+            record_keeper = self.callback.__self__
+            if hasattr(record_keeper, 'transcriptions'):
+                # Get last 3 transcriptions for context
+                recent = record_keeper.transcriptions[-3:] if record_keeper.transcriptions else []
+                recent_history = "\n".join([t["text"] for t in recent])
+
+        prompt = f"""Analyze this emergency dispatch message. Include previous context if relevant.
+If this is not an emergency or disaster-related incident, respond with 'NOT_EMERGENCY'.
+
+Previous context (if relevant):
+{recent_history}
+
+Current message:
 {dispatch_message}
 
-Type: 
-Location: 
-Severity: 
-Units Responding: 
-Description: 
-Timestamp: 
+Format the response exactly as shown below:
+Type: [Specific type of emergency/incident]
+Location: [Exact location including address if available]
+Severity: [Critical/High/Medium/Low]
+Units Responding: [List all responding units]
+Description: [Detailed description of the emergency]
+Timestamp: [Current time]
+
+Debug Info:
+- Confidence: [High/Medium/Low]
+- Reasoning: [Brief explanation of emergency classification]
 """
+
         try:
+            print("\n=== Processing New Dispatch ===")
+            print(f"Message: {dispatch_message}")
+            
             completion = client.chat.completions.create(
                 extra_headers={
                     "HTTP-Referer": "YOUR_WEBSITE",
-                    "X-Title": "Police Scanner Analysis",
+                    "X-Title": "Emergency Dispatch Analysis",
                 },
                 model="deepseek/deepseek-chat:free",
                 messages=[
@@ -125,11 +152,42 @@ Timestamp:
             )
             
             generated_text = completion.choices[0].message.content
-            return self._extract_details(generated_text)
+            print(f"\nAI Response:\n{generated_text}")
+            
+            # Check if it's not an emergency
+            if "NOT_EMERGENCY" in generated_text:
+                print("Result: Not an emergency - skipping")
+                return None
+            
+            # Extract and validate the analysis
+            analysis = self._extract_details(generated_text)
+            is_valid, message = self._validate_analysis(analysis)
+            
+            if not is_valid:
+                print(f"Validation Failed: {message}")
+                return None
+            
+            # Add timestamp if missing
+            if 'Timestamp' not in analysis:
+                analysis['Timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Add debug info
+            analysis['Debug'] = {
+                'Confidence': analysis.get('Confidence', 'Unknown'),
+                'Reasoning': analysis.get('Reasoning', 'Unknown'),
+                'ValidationStatus': message
+            }
+            
+            print("\nValidated Analysis:")
+            for key, value in analysis.items():
+                print(f"{key}: {value}")
+            print("===========================\n")
+            
+            return analysis
             
         except Exception as e:
             print(f"Error in analysis: {e}")
-            return {}
+            return None
 
     def _extract_details(self, text):
         details = {}
@@ -148,6 +206,47 @@ Timestamp:
         # Resample to 16kHz
         audio = audio.set_frame_rate(16000)
         return audio
+
+    def _validate_analysis(self, analysis: Dict) -> tuple[bool, str]:
+        # Required fields that must be present and non-empty
+        required_fields = ['Type', 'Location', 'Severity', 'Units Responding', 'Description']
+        
+        validation_results = []
+        
+        # Check for missing or empty fields
+        for field in required_fields:
+            if field not in analysis:
+                validation_results.append(f"Missing field: {field}")
+            elif not analysis[field].strip():
+                validation_results.append(f"Empty field: {field}")
+        
+        if validation_results:
+            return False, "; ".join(validation_results)
+        
+        # Validate severity levels
+        valid_severities = ['critical', 'high', 'medium', 'low']
+        if analysis['Severity'].lower() not in valid_severities:
+            return False, f"Invalid severity level: {analysis['Severity']}"
+        
+        # List of keywords indicating disasters/emergencies
+        emergency_keywords = [
+            'fire', 'explosion', 'crash', 'accident', 'disaster', 'emergency',
+            'injury', 'casualty', 'damage', 'hazard', 'threat', 'danger',
+            'evacuation', 'rescue', 'critical', 'severe', 'major', 'incident',
+            'medical', 'assault', 'shooting', 'crime', 'violence'
+        ]
+        
+        # Check if the content is related to an emergency
+        description_lower = analysis['Description'].lower()
+        type_lower = analysis['Type'].lower()
+        
+        is_emergency = any(keyword in description_lower or keyword in type_lower 
+                          for keyword in emergency_keywords)
+        
+        if not is_emergency:
+            return False, f"Not emergency-related. Type: {analysis['Type']}, Description contains no emergency keywords"
+        
+        return True, "Valid emergency analysis"
 
 def get_audio_stream(url, output_file="radio.wav"):
   """
