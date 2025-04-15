@@ -2,6 +2,15 @@ import json
 from datetime import datetime
 from openai import OpenAI
 import whisper
+from supabase import create_client
+from geopy.geocoders import Nominatim
+from geopy.exc import GeocoderTimedOut, GeocoderUnavailable
+
+# Initialize Supabase client
+supabase = create_client(
+    "https://qnljdbqnskhvkjorvurb.supabase.co",
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFubGpkYnFuc2todmtqb3J2dXJiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzgyODk0OTIsImV4cCI6MjA1Mzg2NTQ5Mn0.Joj6eu946k1959uNAENOZ4nDo1nQtgTZ-_cpqBp6hGY"
+)
 
 def read_audio_message(audio_file_path):
     # Load Whisper model
@@ -21,6 +30,7 @@ def generate_analysis(dispatch_message):
     prompt = f"""Extract key details from the following dispatcher message and format them exactly as shown below:
 {dispatch_message}
 
+Title: [Brief descriptive title of the incident]
 Type: 
 Location: 
 Severity: 
@@ -43,14 +53,11 @@ Timestamp:
             max_tokens=500
         )
         
-        # print(completion)
-        
         generated_text = completion.choices[0].message.content
-        # print(generated_text)
-        
         details = extract_details(generated_text)
         
         print("\n=== Incident Analysis ===")
+        print(f"Title: {details.get('Title', 'Unknown')}")
         print(f"Type: {details.get('Type', 'Unknown')}")
         print(f"Location: {details.get('Location', 'Unknown')}")
         print(f"Severity: {details.get('Severity', 'Unknown')}")
@@ -74,6 +81,71 @@ def extract_details(text):
             details[key.strip()] = value.strip()
     return details
 
+def get_coordinates(location: str):
+    """
+    Get latitude and longitude coordinates for a given location string.
+    Returns (latitude, longitude) tuple or (None, None) if geocoding fails.
+    """
+    geolocator = Nominatim(user_agent="triage_transcription")
+    try:
+        location_data = geolocator.geocode(location)
+        if location_data:
+            return location_data.latitude, location_data.longitude
+    except (GeocoderTimedOut, GeocoderUnavailable) as e:
+        print(f"Geocoding error for location '{location}': {e}")
+    return None, None
+
+def insert_transcription(text: str, analysis: dict, station_url: str):
+    """
+    Insert transcription data into Supabase database
+    """
+    # Get coordinates for the location
+    location = analysis.get('Location', 'Unknown')
+    latitude, longitude = get_coordinates(location)
+    
+    # Get title from analysis or use first 100 chars of text as fallback
+    title = analysis.get('Title', text[:100])
+    
+    incident_data = {
+        'title': title,
+        'location': location,
+        'type': analysis.get('Type', 'unknown'),
+        'severity': 1,  # Default severity since it's not in current analysis
+        'latitude': latitude,
+        'longitude': longitude,
+        'timestamp': datetime.now().isoformat()
+    }
+
+    try:
+        # Insert the data into the incidents table
+        result = supabase.table('incidents').insert(incident_data).execute()
+        print(f"Successfully inserted transcription: {result.data}")
+        return result.data
+    except Exception as e:
+        print(f"Error inserting transcription: {e}")
+        return None
+
+# Modify the TranscriptionRecord class to use Supabase
+class TranscriptionRecord:
+    def __init__(self):
+        self.transcriptions = []
+        self.max_history = 100
+        
+    def add_transcription(self, text: str, analysis: dict, station_url: str):
+        # Store in local memory
+        self.transcriptions.append({
+            "text": text,
+            "analysis": analysis,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        # Maintain history limit
+        if len(self.transcriptions) > self.max_history:
+            self.transcriptions.pop(0)
+            
+        # Insert into Supabase
+        insert_transcription(text, analysis, station_url)
+
 if __name__ == "__main__":
     # Read dispatch message from audio file
     audio_file_path = "test.mp3"
@@ -81,8 +153,22 @@ if __name__ == "__main__":
     print("\n=== Transcribed Message ===")
     print(dispatch_message)
     print("=====================\n")
-    # dispatch_message = """
-    # Dispatcher, all units, we have a 10 to 31 in progress at 2457 Oakwood Drive. Armed robbery at a convenience store. Suspects are two males, both wearing black hoodies and masks. Witnesses report one is armed with a handgun. Approach with caution. Over. Unit 14, copy that Dispatch. Unit 14 responding, ETA 3 minutes. Any surveillance footage available? Over. Dispatcher. Affirmative. Store security cameras are active. We're pulling footage now. Suspects fled on foot towards Maple Avenue. Over. Unit 22. Dispatch, this is Unit 22. We're setting up a perimeter at Maple and 3rd. Do we have K9 support en route? Over. Dispatcher. Affirmative. K9 Unit 5 is rolling out now. Estimated two minutes out. Over. Unit 14, 10 to 4 approaching scene now. No visual on suspects yet. We'll update. Over. Dispatcher. Copy that. All units maintain caution. Suspects considered armed and dangerous. Over.
-    # """
     
-    generate_analysis(dispatch_message)
+    # Generate analysis
+    analysis = generate_analysis(dispatch_message)
+    
+    # Create a test station URL (since this is a test file)
+    test_station_url = "test_station"
+    
+    # Insert the transcription into Supabase
+    result = insert_transcription(
+        text=dispatch_message,
+        analysis=analysis,
+        station_url=test_station_url
+    )
+    
+    if result:
+        print("\n=== Database Insertion Successful ===")
+        print(f"Inserted record ID: {result[0]['id'] if result else 'Unknown'}")
+    else:
+        print("\n=== Database Insertion Failed ===")
