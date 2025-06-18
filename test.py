@@ -5,11 +5,16 @@ import whisper
 from supabase import create_client
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderUnavailable
+from dotenv import load_dotenv, dotenv_values
+import os
 
 # Initialize Supabase client
+load_dotenv()
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_KEY")
 supabase = create_client(
-    "https://qnljdbqnskhvkjorvurb.supabase.co",
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFubGpkYnFuc2todmtqb3J2dXJiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzgyODk0OTIsImV4cCI6MjA1Mzg2NTQ5Mn0.Joj6eu946k1959uNAENOZ4nDo1nQtgTZ-_cpqBp6hGY"
+    supabase_url,
+    supabase_key
 )
 
 def read_audio_message(audio_file_path):
@@ -24,7 +29,7 @@ def generate_analysis(dispatch_message):
     # OpenRouter API configuration
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
-        api_key="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"
+        api_key=os.getenv("OPENROUTER_API_KEY")
     )
     
     prompt = f"""Extract key details from the following dispatcher message and format them exactly as shown below:
